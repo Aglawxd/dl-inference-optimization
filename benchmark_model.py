@@ -101,3 +101,17 @@ print(f'Average GPU time after torch.compile(): {time_compiled:.2f} ms')
 
 acceleration_compile = GPU_time_precise / time_compiled
 print(f'torch.compile() gave {acceleration_compile:.2f}x change comapred to GPU without optimize')
+
+print('\n --- Optimaize: fp16 (half precision) ---')
+
+model_fp16 = models.resnet18(weights = 'IMAGENET1K_V1')
+model_fp16.eval()
+model_fp16 = model_fp16.to('cuda').half()
+
+data_fp16 = GPU_example_image.to('cuda').half()
+
+time_fp16 = count_GPU_time(model_fp16, data_fp16)
+print(f'Average fp16 GPU time: {time_fp16:.2f} ms')
+
+acceleration_fp16 = GPU_time_precise / time_fp16
+print(f'fp16 gave {acceleration_fp16:.2f}x change compared to default fp32')
