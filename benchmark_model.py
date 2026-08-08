@@ -115,3 +115,35 @@ print(f'Average fp16 GPU time: {time_fp16:.2f} ms')
 
 acceleration_fp16 = GPU_time_precise / time_fp16
 print(f'fp16 gave {acceleration_fp16:.2f}x change compared to default fp32')
+
+print('\n --- Optimize: torch.acutocast (mixed precison) --- ')
+model_autocast = models.resnet18(weights = 'IMAGENET1K_V1')
+model_autocast.eval()
+model_autocast = model_autocast.to('cuda')
+
+def count_time_autocast(model, data, reps=100):
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    with torch.no_grad():
+        with torch.autocast(device_type='cuda', dtype=torch.float16):
+            for _ in range(10):
+                model(data)
+    torch.cuda.synchronize()
+
+    start_event.record()
+    with torch.no_grad():
+        with torch.autocast(device_type='cuda', dtype=torch.float16):
+            for _ in range(reps):
+                model(data)
+    end_event.record()
+
+    torch.cuda.synchronize()
+    full_time_ms = start_event.elapsed_time(end_event)
+    return full_time_ms / reps
+
+time_autocast = count_time_autocast(model_autocast, GPU_example_image)
+print(f'Average GPU time with autocast: {time_autocast:.2f} ms')
+
+acceleration_autocast = GPU_time_precise / time_autocast
+print(f'Autocast gave {acceleration_autocast:.2f}x change compred to GPU without optimize')
