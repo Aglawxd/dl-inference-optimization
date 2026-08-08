@@ -82,3 +82,22 @@ def count_GPU_time(model, data, reps= 100):
 if torch.cuda.is_available():
     GPU_time_precise = count_GPU_time(GPU_model, GPU_example_image )
     print(f'\nPrecise average GPU time: (torch.cuda.Event: {GPU_time_precise:.2f}')
+
+print('\n --- Optimaize: torch.compile() --- ')
+model_compiled = models.resnet18(weights = 'IMAGENET1K_V1')
+model_compiled.eval()
+model_compiled = model_compiled.to('cuda')
+model_compiled = torch.compile(model_compiled)
+
+print('Model compiling. Please wait')
+with torch.no_grad():
+    for _ in range(10):
+        model_compiled(GPU_example_image)
+torch.cuda.synchronize()
+print('Model compiled')
+
+time_compiled = count_GPU_time(model_compiled, GPU_example_image)
+print(f'Average GPU time after torch.compile(): {time_compiled:.2f} ms')
+
+acceleration_compile = GPU_time_precise / time_compiled
+print(f'torch.compile() gave {acceleration_compile:.2f}x change comapred to GPU without optimize')
