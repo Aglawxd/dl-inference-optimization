@@ -32,8 +32,8 @@ print(f'\nAverage inference CPU time: {CPU_time:.2f} ms')
 if torch.cuda.is_available():
     GPU_model = models.resnet18(weights= 'IMAGENET1K_V1')
     GPU_model.eval()
-    GPU_model = GPU_model.to('cuda')
-    GPU_example_image = example_image.to('cuda')
+    GPU_model = GPU_model.to('cuda')#varaible moved from CPU to GPU
+    GPU_example_image = example_image.to('cuda') #varaible moved from CPU to GPU
 
     GPU_time = timer(GPU_model, GPU_example_image)
     print(f'\nAverage  inference GPU time: {GPU_time:.2f} ms')
@@ -60,3 +60,25 @@ if torch.cuda.is_available():
 
     print(prof_GPU.key_averages().table(sort_by='self_cuda_time_total', row_limit=10))
 
+def count_GPU_time(model, data, reps= 100):
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    with torch.no_grad():
+        for _ in range(10):
+            model(data)
+    torch.cuda.synchronize()
+
+    start_event.record()
+    with torch.no_grad():
+        for _ in range(reps):
+            model(data)
+    end_event.record()
+
+    torch.cuda.synchronize()
+    full_time_ms = start_event.elapsed_time(end_event)
+    return full_time_ms / reps
+
+if torch.cuda.is_available():
+    GPU_time_precise = count_GPU_time(GPU_model, GPU_example_image )
+    print(f'\nPrecise average GPU time: (torch.cuda.Event: {GPU_time_precise:.2f}')
