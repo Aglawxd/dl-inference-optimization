@@ -11,7 +11,7 @@ CPU_model.eval()
 print('Model loaded')
 print('Parameters number: ' , sum(p.numel() for p in model.parameters()))
 
-example_image = torch.randn(1, 3, 224, 224)
+example_image = torch.randn(32, 3, 224, 224) #ammount of new images added to program
 
 def timer(model, data, reps= 100):
     with torch.no_grad():
@@ -147,3 +147,19 @@ print(f'Average GPU time with autocast: {time_autocast:.2f} ms')
 
 acceleration_autocast = GPU_time_precise / time_autocast
 print(f'Autocast gave {acceleration_autocast:.2f}x change compred to GPU without optimize')
+
+print('\n --- Optimaize: cudnn.benchmark ----')
+
+torch.backends.cudnn.benchmark = True
+
+model_benchmark = models.resnet18(weights = 'IMAGENET1K_V1')
+model_benchmark.eval()
+model_benchmark = model_benchmark.to('cuda')
+
+time_benchmark = count_GPU_time(model_benchmark, GPU_example_image)
+print(f'Average GPU time with cudnn.benchmark: {time_benchmark:.2f} ms')
+
+acceleration_benchmark = GPU_time_precise / time_benchmark
+print(f'cudnn.benchmark gave {acceleration_benchmark:.2f}x change compred to GPU without optimize')
+
+print('\n ---Test with bigger data ')
