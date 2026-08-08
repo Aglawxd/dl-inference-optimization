@@ -1,21 +1,40 @@
+"""
+DEEP LEARNING INFERENCE OPTIMIZATION
+
+Benchmark project measuring and optimizing inference speed of a pretrained
+ResNet18 model on CPU vs GPU (NVIDIA RTX 2060), inspired by real-world
+tasks in ML infrastructure roles (profiling, optimization, deployment).
+"""
+
 import torch
 import torchvision.models as models
 import time
 from torch.profiler import profile, ProfilerActivity
 
+# 1. LOAD MODEL
+# Pretrained ResNet18 from torchvision -- no training needed,
+# we only care about inference performance here.
+
 model = models.resnet18(weights='IMAGENET1K_V1')
 model.eval()
 CPU_model = models.resnet18(weights= 'IMAGENET1K_V1')
-CPU_model.eval()
+CPU_model.eval() # switch to inference mode (disables dropout/batchnorm training behavior)
 
 print('Model loaded')
 print('Parameters number: ' , sum(p.numel() for p in model.parameters()))
+# 2. SAMPLE INPUT DATA
 
-example_image = torch.randn(32, 3, 224, 224) #ammount of new images added to program
+# Batch of 32 images, 3 color channels (RGB), 224x224 pixels
+# (standard ResNet input size). Random data is fine for timing --
+# we only care about how long inference takes, not the actual prediction.
+batch_size = int(input('Enter batch size: '))
+example_image = torch.randn(batch_size, 3, 224, 224) #ammount of new images added to program
+
+# 3. TIMING HELPERS
 
 def timer(model, data, reps= 100):
     with torch.no_grad():
-        for _ in range(10):
+        for _ in range(10): # warm-up: first calls are always slower
             model(data)
     start = time.time()
     with torch.no_grad():
@@ -162,4 +181,3 @@ print(f'Average GPU time with cudnn.benchmark: {time_benchmark:.2f} ms')
 acceleration_benchmark = GPU_time_precise / time_benchmark
 print(f'cudnn.benchmark gave {acceleration_benchmark:.2f}x change compred to GPU without optimize')
 
-print('\n ---Test with bigger data ')
