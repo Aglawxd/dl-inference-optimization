@@ -1,180 +1,179 @@
-# Sprawozdanie z projektu: Deep Learning Inference Optimization
+# Project Report: Deep Learning Inference Optimization
 
-**Autor:** Stanisław Wałga
-**Repozytorium:** `dl-inference-optimization` (GitHub)
-**Sprzęt testowy:** NVIDIA GeForce RTX 2060 (CUDA 13.1, sterownik), PyTorch 2.13.0+cu130
-**Model referencyjny:** ResNet18 (torchvision, wagi IMAGENET1K_V1, 11 689 512 parametrów)
-
----
-
-## 1. Cel projektu
-
-Projekt odtwarza — w mniejszej skali — trzy zadania typowe dla inżynierii wydajności modeli AI w środowisku produkcyjnym:
-
-1. **Pomiar i poprawa szybkości inferencji** na akceleratorach GPU.
-2. **Profilowanie obciążeń DL** w celu identyfikacji wąskich gardeł.
-3. **Wdrożenie modelu jako usługi produkcyjnej** (REST API) z uwzględnieniem realnych wzorców ruchu.
-
-Model referencyjny (ResNet18) pełni rolę obciążenia testowego — celem nie jest jakość klasyfikacji, tylko charakterystyka wydajnościowa i metodologia jej badania, przenaszalna na inne architektury.
+**Repository:** `dl-inference-optimization`
+**Test hardware:** NVIDIA GeForce RTX 2060 (CUDA 13.1 driver), PyTorch 2.13.0+cu130
+**Reference model:** ResNet18 (torchvision, IMAGENET1K_V1 weights, 11,689,512 parameters)
 
 ---
 
-## 2. Metodologia pomiaru
+## 1. Project Goal
 
-Zastosowano dwie metody pomiaru czasu, celowo porównane ze sobą:
+This project reproduces, at a smaller scale, three tasks typical of AI performance engineering in a production environment:
 
-| Metoda | Zastosowanie | Uwagi |
+1. **Measuring and improving inference speed** on GPU accelerators.
+2. **Profiling DL workloads** to identify bottlenecks.
+3. **Deploying a model as a production service** (REST API) with realistic traffic patterns in mind.
+
+The reference model (ResNet18) serves as a test workload — the goal is not classification quality, but performance characterization and methodology, transferable to other architectures.
+
+---
+
+## 2. Measurement Methodology
+
+Two timing methods were used, deliberately compared against each other:
+
+| Method | Use case | Notes |
 |---|---|---|
-| `time.time()` | CPU, pomiar orientacyjny | Zawodny na GPU ze względu na asynchroniczne wykonanie |
-| `torch.cuda.Event` + `torch.cuda.synchronize()` | GPU, pomiar precyzyjny | Gwarantuje odczyt po faktycznym zakończeniu obliczeń na karcie |
+| `time.time()` | CPU, orientative measurement | Unreliable on GPU due to asynchronous execution |
+| `torch.cuda.Event` + `torch.cuda.synchronize()` | GPU, precise measurement | Guarantees the reading happens after computation actually finishes on the device |
 
-Każdy pomiar poprzedzony był fazą **rozgrzewki** (10 wywołań pominiętych w statystyce) — pierwsze wywołanie modelu jest systematycznie wolniejsze (alokacja pamięci, inicjalizacja kerneli CUDA) i zniekształcałoby wynik średni. Każdy właściwy pomiar to średnia z 100 powtórzeń.
+Every measurement was preceded by a **warm-up phase** (10 calls excluded from statistics) — the first call to a model is systematically slower (memory allocation, CUDA kernel initialization) and would distort the average. Each actual measurement is an average of 100 repetitions.
 
-Weryfikacja krzyżowa obu metod na tym samym obciążeniu dała zbieżne wyniki (4.25–4.67 ms), co potwierdza wiarygodność pomiarów prostszą metodą tam, gdzie precyzyjna nie była jeszcze zaimplementowana.
+Cross-validation of both methods on the same workload produced consistent results (4.25–4.67 ms), confirming the reliability of the simpler method where the precise one was not yet implemented.
 
 ---
 
-## 3. Wyniki: baseline CPU vs GPU
+## 3. Results: CPU vs GPU Baseline
 
-| Rozmiar batcha | CPU (ms) | GPU (ms) | Przyspieszenie |
+| Batch size | CPU (ms) | GPU (ms) | Speedup |
 |---|---|---|---|
-| 1 | 38,86–39,72 | 4,25–4,67 | ~9,1× |
-| 32 | 1011,46 | 25,19–25,70 | ~40,2× |
+| 1 | 38.86–39.72 | 4.25–4.67 | ~9.1× |
+| 32 | 1011.46 | 25.19–25.70 | ~40.2× |
 
-**Obserwacja:** przewaga GPU rośnie nieliniowo wraz z rozmiarem batcha — CPU skaluje się niemal liniowo z liczbą obrazów, GPU wykorzystuje równoległość sprzętową i rośnie znacznie wolniej. To pierwszy sygnał, że GPU tej klasy jest niedociążone przy pojedynczych zapytaniach.
+**Observation:** the GPU advantage grows non-linearly with batch size — CPU scales nearly linearly with the number of images, while GPU leverages hardware parallelism and grows much more slowly. This is an early signal that a GPU of this class is underutilized on single requests.
 
 ---
 
-## 4. Profilowanie (`torch.profiler`)
+## 4. Profiling (`torch.profiler`)
 
-### CPU — rozkład czasu wykonania
+### CPU — execution time breakdown
 
-| Operacja | Udział w czasie całkowitym |
+| Operation | Share of total time |
 |---|---|
 | `aten::mkldnn_convolution` | 81–85% |
 | `aten::max_pool2d_with_indices` | 6–9% |
-| `aten::batch_norm` (i pochodne) | 4–5% |
-| pozostałe | <2% |
+| `aten::batch_norm` (and derivatives) | 4–5% |
+| remaining | <2% |
 
-Konwolucje jednoznacznie dominują — dowolna optymalizacja CPU powinna koncentrować się wyłącznie na tej operacji.
+Convolutions clearly dominate — any CPU-side optimization should focus exclusively on this operation.
 
-### GPU — rozkład czasu wykonania
+### GPU — execution time breakdown
 
-| Operacja | Udział w czasie całkowitym |
+| Operation | Share of total time |
 |---|---|
 | `aten::cudnn_convolution` | 25–35% |
 | `aten::cudnn_batch_norm` | 22–26% |
-| narzut zarządzania (`empty`, `view`, `empty_like`) | ~10–15% |
+| management overhead (`empty`, `view`, `empty_like`) | ~10–15% |
 
-**Wniosek:** na GPU rozkład jest znacznie bardziej równomierny. Konwolucje przestają dominować (cuDNN wykonuje je bardzo wydajnie), a proporcjonalny udział normalizacji wsadowej oraz narzutu zarządzania pamięcią rośnie. Oznacza to, że optymalizacja pod GPU wymaga innego podejścia niż pod CPU — nie wystarczy przyspieszyć jednej operacji.
+**Conclusion:** on GPU, the distribution is significantly more even. Convolutions stop dominating (cuDNN executes them very efficiently), while the proportional share of batch normalization and memory-management overhead increases. This means GPU-side optimization requires a different approach than CPU-side — speeding up a single operation is not enough.
 
 ---
 
-## 5. Testy technik optymalizacji
+## 5. Optimization Technique Testing
 
-Przetestowano cztery standardowe techniki optymalizacji inferencji, każdą względem tego samego baseline'u (`torch.cuda.Event`, fp32, bez optymalizacji).
+Four standard inference optimization techniques were tested, each measured against the same baseline (`torch.cuda.Event`, fp32, no optimization).
 
-### Przy batch_size = 1
+### At batch_size = 1
 
-| Technika | Wynik | Zmiana względem baseline |
+| Technique | Result | Change vs. baseline |
 |---|---|---|
-| `torch.compile()` | 5,06–5,19 ms | 0,86–0,95× (**wolniej**) |
-| `.half()` (fp16 ręczne) | 6,25–6,44 ms | 0,72× (**wolniej**) |
-| `torch.autocast` (mixed precision) | 5,70–5,82 ms | 0,78–0,80× (**wolniej**) |
-| `torch.backends.cudnn.benchmark` | 4,59 ms | 0,99× (bez zmiany) |
+| `torch.compile()` | 5.06–5.19 ms | 0.86–0.95× (**slower**) |
+| `.half()` (manual fp16) | 6.25–6.44 ms | 0.72× (**slower**) |
+| `torch.autocast` (mixed precision) | 5.70–5.82 ms | 0.78–0.80× (**slower**) |
+| `torch.backends.cudnn.benchmark` | 4.59 ms | 0.99× (no change) |
 
-**Żadna z czterech technik nie przyniosła poprawy.** Wynik ten, choć sprzeczny z intuicją opartą na dokumentacji tych narzędzi, jest w pełni wytłumaczalny (patrz sekcja 6).
+**None of the four techniques produced an improvement.** This result, while counterintuitive relative to documentation claims for these tools, is fully explainable (see Section 6).
 
-### Przy batch_size = 32
+### At batch_size = 32
 
-| Technika | Wynik | Zmiana względem baseline |
+| Technique | Result | Change vs. baseline |
 |---|---|---|
-| `torch.compile()` | — | 0,79× (nadal wolniej) |
-| `.half()` (fp16 ręczne) | — | **1,99×** (szybciej) |
-| `torch.autocast` (mixed precision) | — | **2,01×** (szybciej) |
-| `torch.backends.cudnn.benchmark` | — | 1,03× (marginalnie) |
+| `torch.compile()` | — | 0.79× (still slower) |
+| `.half()` (manual fp16) | — | **1.99×** (faster) |
+| `torch.autocast` (mixed precision) | — | **2.01×** (faster) |
+| `torch.backends.cudnn.benchmark` | — | 1.03× (marginal) |
 
-**Kluczowy wynik projektu:** fp16 i mixed precision, bezużyteczne przy pojedynczych zapytaniach, dają blisko dwukrotne przyspieszenie przy większym obciążeniu równoległym.
-
----
-
-## 6. Analiza przyczynowa
-
-Trzy czynniki tłumaczą powyższe wyniki:
-
-1. **Niedociążenie GPU przy batch=1.** Pojedyncze zapytanie nie generuje wystarczającej liczby równoległych operacji, by zrekompensować narzut zarządzania precyzją (konwersja fp32↔fp16) czy kompilacją grafu (`torch.compile`). Narzut administracyjny przewyższa zysk obliczeniowy.
-
-2. **Generacja architektury GPU.** RTX 2060 (Turing, 2018) ma rdzenie Tensor pierwszej generacji, o istotnie mniejszej przepustowości niż układy Ampere/Ada/Hopper, na których dokumentowane są największe zyski z mixed precision. Komunikat profilera `Not enough SMs to use max_autotune_gemm mode` bezpośrednio potwierdza ograniczenie sprzętowe względem trybów agresywnej optymalizacji `torch.compile`.
-
-3. **Skala modelu.** ResNet18 (11,7 mln parametrów) jest już blisko optymalnie obsługiwany przez natywny cuDNN w fp32. Techniki optymalizacyjne ujawniają swoją wartość silniej przy większych, głębszych architekturach, gdzie koszt administracyjny jest relatywnie mniejszy wobec objętości obliczeń.
-
-**Wniosek metodologiczny:** efektywność technik optymalizacji inferencji nie jest właściwością uniwersalną — zależy łącznie od sprzętu, rozmiaru modelu i rzeczywistego wzorca obciążenia. Decyzje optymalizacyjne wymagają pomiaru w warunkach zbliżonych do produkcyjnych, nie ekstrapolacji z dokumentacji ani wyników referencyjnych publikowanych na innym sprzęcie.
+**Key project finding:** fp16 and mixed precision, useless on single requests, deliver nearly a 2x speedup under larger parallel workloads.
 
 ---
 
-## 7. Wdrożenie produkcyjne: API z dynamicznym batchowaniem
+## 6. Root Cause Analysis
 
-### Problem projektowy
+Three factors explain the results above:
 
-Wynik z sekcji 5 rodzi praktyczny konflikt: typowe zapytanie API obsługuje pojedynczy obraz (batch=1) — dokładnie scenariusz, w którym fp16/autocast nie dają korzyści. Zbudowanie API bez uwzględnienia tego faktu skutkowałoby architekturą, która nigdy nie realizuje zmierzonego potencjału przyspieszenia.
+1. **GPU underutilization at batch=1.** A single request does not generate enough parallel operations to offset the overhead of precision management (fp32↔fp16 conversion) or graph compilation (`torch.compile`). Administrative overhead outweighs the computational gain.
 
-### Rozwiązanie: dynamic batching
+2. **GPU architecture generation.** The RTX 2060 (Turing, 2018) has first-generation Tensor Cores, with significantly lower throughput than Ampere/Ada/Hopper chips, where the largest mixed-precision gains are typically documented. The profiler message `Not enough SMs to use max_autotune_gemm mode` directly confirms a hardware limitation relative to `torch.compile`'s aggressive optimization modes.
 
-Zaimplementowano wzorzec stosowany w produkcyjnych serwerach inferencji (koncepcyjnie zbliżony do Triton Inference Server / TorchServe):
+3. **Model scale.** ResNet18 (11.7M parameters) is already close to optimally handled by native cuDNN in fp32. Optimization techniques reveal their value more strongly on larger, deeper architectures, where administrative cost is relatively smaller compared to the volume of computation.
+
+**Methodological conclusion:** the effectiveness of inference optimization techniques is not a universal property — it depends jointly on hardware, model size, and the actual workload pattern. Optimization decisions require measurement under conditions close to production, not extrapolation from documentation or benchmark results published on different hardware.
+
+---
+
+## 7. Production Deployment: Dynamic Batching API
+
+### Design Problem
+
+The result from Section 5 creates a practical conflict: a typical API request handles a single image (batch=1) — exactly the scenario in which fp16/autocast provide no benefit. Building an API without accounting for this would result in an architecture that never realizes the measured speedup potential.
+
+### Solution: Dynamic Batching
+
+A pattern used in production inference servers was implemented (conceptually similar to Triton Inference Server / TorchServe):
 
 ```
-Zapytania klientów (asynchroniczne, pojedyncze)
+Client requests (asynchronous, individual)
         │
         ▼
-   queue.Queue()  ──►  wątek w tle (daemon)
+   queue.Queue()  ──►  background thread (daemon)
         │                    │
-        │        zbiera zapytania przez okno czasowe
-        │        (max 50 ms lub do MAX_BATCH_SIZE=32)
+        │        collects requests over a time window
+        │        (max 50 ms or up to MAX_BATCH_SIZE=32)
         │                    │
-        │        łączy w jeden tensor wsadowy
-        │        inferencja w torch.autocast (fp16)
+        │        stacks into a single batch tensor
+        │        runs inference under torch.autocast (fp16)
         │                    │
-        │        rozdziela wyniki do poszczególnych
-        │        zapytań (threading.Condition)
+        │        splits results back to individual
+        │        requests (threading.Condition)
         ▼                    ▼
-   odpowiedź 1  ◄──────  wynik dla zapytania 1
-   odpowiedź 2  ◄──────  wynik dla zapytania 2
+   response 1  ◄──────  result for request 1
+   response 2  ◄──────  result for request 2
    ...
 ```
 
-**Elementy implementacji:**
-- `queue.Queue` — bezpieczna wątkowo kolejka przyjmująca zapytania
-- wątek `daemon` działający niezależnie od cyklu żądanie–odpowiedź Flaska
-- `threading.Condition` — synchronizacja bez aktywnego odpytywania (busy-waiting)
-- `app.run(threaded=True)` — obsługa wielu równoczesnych połączeń klienckich
+**Implementation elements:**
+- `queue.Queue` — thread-safe queue accepting incoming requests
+- a `daemon` thread running independently of Flask's request–response cycle
+- `threading.Condition` — synchronization without active polling (busy-waiting)
+- `app.run(threaded=True)` — handling multiple concurrent client connections
 
-### Wynik testu obciążeniowego
+### Load Test Result
 
-Test: 10 równoczesnych zapytań (osobne wątki klienckie, wysłane w tym samym momencie).
+Test: 10 concurrent requests (separate client threads, fired at the same moment).
 
-| Metryka | Wartość |
+| Metric | Value |
 |---|---|
-| Liczba zapytań zebranych w jeden batch | 10 / 10 (100%) |
-| Czas inferencji całego batcha | 268,68 ms |
-| Czas przetwarzania per obraz w batchu | ~26,9 ms |
-| Całkowity czas odpowiedzi (round-trip) per zapytanie | 346–375 ms |
+| Requests collected into a single batch | 10 / 10 (100%) |
+| Full batch inference time | 268.68 ms |
+| Per-image processing time within batch | ~26.9 ms |
+| Total response time (round-trip) per request | 346–375 ms |
 
-**Interpretacja:** wszystkie równoczesne zapytania zostały poprawnie połączone w jeden batch i przetworzone wspólnie z wykorzystaniem `torch.autocast`, realizując zmierzone w sekcji 5 przyspieszenie. Różnica między czasem samej inferencji (268 ms) a pełnym round-trip (~355 ms) wynika z czasu oczekiwania w oknie batchowania oraz narzutu komunikacji HTTP — jest to świadomy kompromis: **wzrost przepustowości systemu (throughput) kosztem opóźnienia pojedynczego zapytania (latency)**, typowy dla architektur batchujących w produkcji.
-
----
-
-## 8. Ograniczenia projektu
-
-- Testy przeprowadzono na pojedynczym GPU klasy konsumenckiej (RTX 2060); wyniki ilościowe nie ekstrapolują się wprost na karty klasy data center (A100, H100).
-- Okno batchowania (50 ms) i maksymalny rozmiar batcha (32) dobrano empirycznie na potrzeby demonstracji; produkcyjne strojenie wymagałoby analizy rozkładu ruchu (traffic pattern) i akceptowalnego SLA opóźnienia.
-- `torch.compile()` nie został poddany głębszej diagnostyce przyczyn braku poprawy (np. analizie wygenerowanego kodu Triton) — potencjalny kierunek dalszej pracy.
-- Test API wykorzystuje syntetyczne dane wejściowe (losowy tensor) — środowisko produkcyjne wymagałoby walidacji z rzeczywistymi obrazami i obsługą błędnych/niepoprawnych danych wejściowych.
+**Interpretation:** all concurrent requests were correctly merged into a single batch and processed together using `torch.autocast`, realizing the speedup measured in Section 5. The gap between pure inference time (268 ms) and full round-trip (~355 ms) is due to waiting time within the batching window plus HTTP communication overhead — this is a deliberate trade-off: **increased system throughput at the cost of individual request latency**, typical of batching architectures in production.
 
 ---
 
-## 9. Wnioski końcowe
+## 8. Project Limitations
 
-1. GPU zapewnia 9–40-krotne przyspieszenie względem CPU dla tego obciążenia, przy czym przewaga rośnie z rozmiarem batcha.
-2. Standardowe techniki optymalizacji inferencji (mixed precision, `torch.compile`, autotuning cuDNN) **nie działają uniwersalnie** — ich skuteczność zależy od rozmiaru batcha, architektury GPU i skali modelu, i wymaga empirycznej weryfikacji w warunkach zbliżonych do docelowych.
-3. Przy odpowiednio dobranym obciążeniu (batch=32) mixed precision (fp16/autocast) dała powtarzalne, blisko dwukrotne przyspieszenie.
-4. Świadomość rozbieżności między charakterystyką pojedynczego zapytania a charakterystyką zapytań wsadowych pozwoliła zaprojektować architekturę wdrożeniową (dynamic batching), która realizuje zmierzony potencjał optymalizacji również przy typowym, pojedynczym ruchu API — bez tego mechanizmu zysk z fp16 pozostałby czysto teoretyczny.
+- Tests were run on a single consumer-grade GPU (RTX 2060); quantitative results do not directly extrapolate to data-center-class cards (A100, H100).
+- The batching window (50 ms) and maximum batch size (32) were chosen empirically for demonstration purposes; production tuning would require analysis of actual traffic patterns and an acceptable latency SLA.
+- `torch.compile()` was not subjected to deeper root-cause diagnostics (e.g., inspection of generated Triton code) — a potential direction for further work.
+- The API test uses synthetic input data (random tensors) — a production environment would require validation with real images and handling of malformed/invalid input.
+
+---
+
+## 9. Conclusions
+
+1. GPU delivers a 9–40x speedup relative to CPU for this workload, with the advantage growing with batch size.
+2. Standard inference optimization techniques (mixed precision, `torch.compile`, cuDNN autotuning) **do not work universally** — their effectiveness depends on batch size, GPU architecture, and model scale, and requires empirical verification under conditions close to the target deployment.
+3. With appropriately sized workloads (batch=32), mixed precision (fp16/autocast) delivered a consistent, nearly 2x speedup.
+4. Recognizing the gap between single-request and batched-request performance characteristics made it possible to design a deployment architecture (dynamic batching) that realizes the measured optimization potential even under typical, single-request API traffic — without this mechanism, the fp16 gain would have remained purely theoretical.
